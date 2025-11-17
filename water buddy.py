@@ -215,7 +215,7 @@ def plot_progress_donut(consumed_ml, goal_ml):
     c = Circle((0,0), 0.62, color="#071927")
     ax.add_patch(c)
     ax.text(0, 0.08, f"{int(pct*100)}%", ha='center', va='center', fontsize=18, color="#CFF8FF", weight='bold')
-    ax.text(0, -0.18, f"{int(consumed_ml)} / {int(goal_ml)} ml", ha='center', va='center', fontsize=9, color="#AEEFF6')
+    ax.text(0, -0.18, f"{int(consumed_ml)} / {int(goal_ml)} ml", ha='center', va='center', fontsize=9, color="#AEEFF6")
     ax.set_xticks([])
     ax.set_yticks([])
     fig.patch.set_facecolor('#071927')
@@ -468,3 +468,4 @@ if stop_reminders:
 # Footer
 st.markdown("---")
 st.markdown("Built from a Tkinter prototype — ported to Streamlit. Keep this tab open to receive browser reminders.")
+
