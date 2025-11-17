@@ -1,29 +1,19 @@
+# app.py
 """
-Water Buddy - Standalone Python (Tkinter) app (single file)
-Run with: python water_buddy_desktop.py  (or open in IDLE and Run Module)
-
-No external libraries required.
-
-Features:
-- Profile (name, age, weight kg, activity level)
-- Goal calculation: base 35 ml/kg (adjusted by activity & age)
-- Log water (quick buttons + custom)
-- Reminders via Tkinter popup (configurable interval)
-- Daily progress ring (Canvas) and weekly bar chart (Canvas)
-- SQLite local storage (profile + logs)
-- Eco Mode estimate: bottles saved
-- Gamification: streaks & badges
-- Export data to CSV
-- Simple "predictor" that adjusts suggestions based on recent activity
+Water Buddy - Streamlit version (single file)
+Converted from a Tkinter desktop app to Streamlit (complete clone - Option C)
+Run with: streamlit run app.py
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog, filedialog
+import streamlit as st
 import sqlite3
-import os
 from datetime import datetime, date, timedelta
 import math
+import io
 import csv
+import matplotlib.pyplot as plt
+from matplotlib.patches import Wedge, Circle
+import pandas as pd
 
 # ---------------------------
 # Constants & DB
@@ -31,9 +21,15 @@ import csv
 DB_PATH = "water_buddy_local.db"
 BASE_ML_PER_KG = 35  # ml per kg base guideline
 
-# create DB & tables if not exist
+# ---------------------------
+# Database helpers
+# ---------------------------
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    return conn
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS profile (
@@ -65,10 +61,10 @@ def init_db():
 init_db()
 
 # ---------------------------
-# Data helpers
+# Data functions
 # ---------------------------
 def get_profile():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     c.execute('SELECT * FROM profile ORDER BY id DESC LIMIT 1')
     row = c.fetchone()
@@ -78,23 +74,23 @@ def get_profile():
     return None
 
 def set_profile(name, age, weight_kg, activity):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     c.execute('INSERT INTO profile (name, age, weight_kg, activity, created_at) VALUES (?, ?, ?, ?, ?)',
-              (name, age, weight_kg, activity, datetime.utcnow().isoformat()))
+              (name, int(age), float(weight_kg), activity, datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
 
 def log_water_ml(amount_ml):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute('INSERT INTO logs (logged_at, amount_ml) VALUES (?, ?)', (datetime.utcnow().isoformat(), amount_ml))
+    c.execute('INSERT INTO logs (logged_at, amount_ml) VALUES (?, ?)', (datetime.utcnow().isoformat(), int(amount_ml)))
     conn.commit()
     conn.close()
     check_badges_and_streaks()
 
 def get_totals_for_days(days=7):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     totals = []
     for i in range(days-1, -1, -1):
@@ -109,7 +105,7 @@ def get_totals_for_days(days=7):
     return totals
 
 def get_today_total():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     start = datetime.combine(date.today(), datetime.min.time()).isoformat()
     end = datetime.combine(date.today(), datetime.max.time()).isoformat()
@@ -118,22 +114,25 @@ def get_today_total():
     conn.close()
     return row[0] if row and row[0] else 0
 
-def export_logs_csv(path):
-    conn = sqlite3.connect(DB_PATH)
+def export_logs_df():
+    conn = get_conn()
     c = conn.cursor()
     c.execute('SELECT logged_at, amount_ml FROM logs ORDER BY logged_at')
     rows = c.fetchall()
     conn.close()
-    with open(path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['logged_at', 'amount_ml'])
-        writer.writerows(rows)
+    df = pd.DataFrame(rows, columns=['logged_at', 'amount_ml'])
+    return df
+
+def export_logs_csv_bytes():
+    df = export_logs_df()
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    return buf.getvalue().encode('utf-8')
 
 # ---------------------------
 # Business logic
 # ---------------------------
 def calculate_goal_ml(weight_kg, age=None, activity='normal', weather_temp_c=None):
-    # base formula
     base = weight_kg * BASE_ML_PER_KG
     multiplier = 1.0
     if activity == 'low':
@@ -150,19 +149,16 @@ def calculate_goal_ml(weight_kg, age=None, activity='normal', weather_temp_c=Non
     return int(base * multiplier)
 
 def estimate_bottles_saved(total_ml, bottle_size_ml=500):
-    # naive eco estimate: how many plastic bottles equivalent avoided if user uses refill bottle
     return total_ml / bottle_size_ml
 
-# Simple predictor: checks last 3 days average and suggests increasing reminders if intake low
 def predictor_adjustment():
     totals = get_totals_for_days(7)
-    recent = totals[-3:]  # last 3 days
+    recent = totals[-3:]
     avg = sum(t['total_ml'] for t in recent) / 3
     profile = get_profile()
     if not profile:
         return 1.0
     goal = calculate_goal_ml(profile['weight_kg'], age=profile['age'], activity=profile['activity'])
-    # if avg is below 70% of goal -> be more aggressive
     if avg < 0.7 * goal:
         return 1.2
     elif avg < 0.9 * goal:
@@ -172,10 +168,8 @@ def predictor_adjustment():
 
 # Badges & streaks
 def check_badges_and_streaks():
-    # award a badge for 7 days of logging >75% goal
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
-    # check last 7 days totals
     totals = get_totals_for_days(7)
     profile = get_profile()
     if not profile:
@@ -185,7 +179,6 @@ def check_badges_and_streaks():
     c.execute('SELECT * FROM badges WHERE name = ?', ('7-day-streak',))
     if good_days == 7 and not c.fetchone():
         c.execute('INSERT INTO badges (name, earned_at) VALUES (?, ?)', ('7-day-streak', datetime.utcnow().isoformat()))
-    # simple 'first-log' badge
     c.execute('SELECT COUNT(*) FROM logs')
     total_logs = c.fetchone()[0]
     c.execute('SELECT * FROM badges WHERE name = ?', ('first-log',))
@@ -195,7 +188,7 @@ def check_badges_and_streaks():
     conn.close()
 
 def get_badges():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_conn()
     c = conn.cursor()
     c.execute('SELECT name, earned_at FROM badges ORDER BY earned_at DESC')
     rows = c.fetchall()
@@ -203,413 +196,275 @@ def get_badges():
     return rows
 
 # ---------------------------
-# UI
+# Visuals (matplotlib)
 # ---------------------------
-class WaterBuddyApp(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Water Buddy")
-        self.geometry("1250x640")
-        self.configure(bg="#071928")
-        self.resizable(False, False)
+def plot_progress_donut(consumed_ml, goal_ml):
+    pct = min(1.0, consumed_ml / max(1, goal_ml))
+    remaining = max(0, goal_ml - consumed_ml)
+    fig, ax = plt.subplots(figsize=(3.4, 3.4), dpi=80)
+    ax.axis('equal')
+    # Draw donut: achieved slice and remaining slice
+    achieved = pct
+    wedges = [Wedge((0,0), 1, 90, 90 - achieved*360, width=0.38),
+              Wedge((0,0), 1, 90 - achieved*360, 90 - 360, width=0.38)]
+    colors = ["#00E5FF", "#04262B"]
+    for w, col in zip(wedges, colors):
+        ax.add_patch(w)
+        w.set_facecolor(col)
+    # center circle
+    c = Circle((0,0), 0.62, color="#071927")
+    ax.add_patch(c)
+    ax.text(0, 0.08, f"{int(pct*100)}%", ha='center', va='center', fontsize=18, color="#CFF8FF", weight='bold')
+    ax.text(0, -0.18, f"{int(consumed_ml)} / {int(goal_ml)} ml", ha='center', va='center', fontsize=9, color="#AEEFF6')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    fig.patch.set_facecolor('#071927')
+    ax.set_facecolor('#071927')
+    plt.tight_layout()
+    return fig
 
-        # state
-        self.profile = get_profile()
-        self.reminder_interval_min = 60  # default
-        self.reminder_job = None
-        self.reminder_enabled = False
-
-        # build UI
-        self._build_header()
-        self._build_left_panel()
-        self._build_main_panel()
-        self._load_profile_state()
-        self.refresh_ui()
-
-    def _build_header(self):
-        header = tk.Frame(self, bg="#062027", height=80)
-        header.pack(side=tk.TOP, fill=tk.X)
-        title = tk.Label(header, text="Water Buddy", fg="#00E5FF", bg="#062027", font=("Montserrat", 22, "bold"))
-        title.pack(side=tk.LEFT, padx=18, pady=12)
-        subtitle = tk.Label(header, text="Formative Assessment 1 — Python", fg="#BFEFF6", bg="#062027", font=("Lato", 10))
-        subtitle.pack(side=tk.LEFT, padx=6, pady=18)
-        name = tk.Label(header, text="By: Jashith Rathod,Nishtha Shah & Zene Anand", fg="#A9F0FF", bg="#062027", font=("Lato", 10))
-        name.pack(side=tk.RIGHT, padx=18)
-
-    def _build_left_panel(self):
-        left = tk.Frame(self, bg="#052022", width=300)
-        left.pack(side=tk.LEFT, fill=tk.Y)
-
-        # Profile card
-        prof_card = tk.LabelFrame(left, text="Profile", fg="#DFF9FF", bg="#052022", bd=0, font=("Lato", 12, "bold"))
-        prof_card.pack(padx=12, pady=12, fill=tk.X)
-        self.lbl_profile = tk.Label(prof_card, text="No profile set", fg="#CFF8FF", bg="#052022", justify=tk.LEFT, anchor='w', font=("Lato", 11))
-        self.lbl_profile.pack(padx=8, pady=6, fill=tk.X)
-        tk.Button(prof_card, text="Edit Profile", command=self.open_profile_dialog, bg="#00CEDA", fg="black").pack(padx=8, pady=6, fill=tk.X)
-
-        # Quick log
-        log_card = tk.LabelFrame(left, text="Quick Log", fg="#DFF9FF", bg="#052022", bd=0, font=("Lato", 12, "bold"))
-        log_card.pack(padx=12, pady=6, fill=tk.X)
-        btns = tk.Frame(log_card, bg="#052022")
-        btns.pack(padx=8, pady=6)
-        for amt in (50, 100, 250, 500):
-            b = tk.Button(btns, text=f"+{amt} ml", command=lambda a=amt: self.log_and_refresh(a), bg="#0BBEE6", fg="black")
-            b.pack(side=tk.LEFT, padx=4, pady=4)
-
-        custom_frame = tk.Frame(log_card, bg="#052022")
-        custom_frame.pack(padx=8, pady=6, fill=tk.X)
-        self.entry_custom = tk.Entry(custom_frame)
-        self.entry_custom.pack(side=tk.LEFT, padx=4, pady=4, fill=tk.X, expand=True)
-        tk.Button(custom_frame, text="Log", command=self.log_custom).pack(side=tk.LEFT, padx=4)
-
-        # Reminders
-        rem_card = tk.LabelFrame(left, text="Reminders", fg="#DFF9FF", bg="#052022", bd=0, font=("Lato", 12, "bold"))
-        rem_card.pack(padx=12, pady=6, fill=tk.X)
-        tk.Label(rem_card, text="Interval (mins):", bg="#052022", fg="#CFF8FF").pack(anchor='w', padx=8)
-        self.spin_interval = tk.Spinbox(rem_card, from_=15, to=240, increment=5, width=6)
-        self.spin_interval.pack(padx=8, pady=4, anchor='w')
-        btns_rem = tk.Frame(rem_card, bg="#052022")
-        btns_rem.pack(padx=8, pady=6, fill=tk.X)
-        tk.Button(btns_rem, text="Start", bg="#00E5FF", command=self.start_reminders).pack(side=tk.LEFT, padx=4)
-        tk.Button(btns_rem, text="Stop", bg="#FF6B6B", command=self.stop_reminders).pack(side=tk.LEFT, padx=4)
-
-        # Export & Settings
-        util_card = tk.LabelFrame(left, text="Utilities", fg="#DFF9FF", bg="#052022", bd=0, font=("Lato", 12, "bold"))
-        util_card.pack(padx=12, pady=6, fill=tk.X)
-        tk.Button(util_card, text="Export logs to CSV", command=self.export_csv, bg="#3CE6A6").pack(padx=8, pady=6, fill=tk.X)
-        tk.Button(util_card, text="Show Badges", command=self.show_badges, bg="#FFE26E").pack(padx=8, pady=6, fill=tk.X)
-
-    def _build_main_panel(self):
-        main = tk.Frame(self, bg="#071927")
-        main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=12, pady=12)
-
-        # Top info: goal and progress
-        top = tk.Frame(main, bg="#071927")
-        top.pack(fill=tk.X)
-        self.lbl_goal = tk.Label(top, text="Goal: -- ml", bg="#071927", fg="#CFF8FF", font=("Montserrat", 18, "bold"))
-        self.lbl_goal.pack(side=tk.LEFT, padx=6)
-        self.lbl_today = tk.Label(top, text="Today: 0 ml", bg="#071927", fg="#A9F0FF", font=("Lato", 12))
-        self.lbl_today.pack(side=tk.LEFT, padx=24)
-
-        # canvas area for progress ring and weekly chart
-        canvas_frame = tk.Frame(main, bg="#071927")
-        canvas_frame.pack(fill=tk.BOTH, expand=True, pady=12)
-
-        left_canvas = tk.Canvas(canvas_frame, width=380, height=380, bg="#071927", highlightthickness=0)
-        left_canvas.pack(side=tk.LEFT, padx=12, pady=6)
-        self.left_canvas = left_canvas
-
-        right_canvas = tk.Canvas(canvas_frame, width=520, height=380, bg="#071927", highlightthickness=0)
-        right_canvas.pack(side=tk.LEFT, padx=12, pady=6, fill=tk.BOTH, expand=True)
-        self.right_canvas = right_canvas
-
-        # Buttons below
-        bottom = tk.Frame(main, bg="#071927")
-        bottom.pack(fill=tk.X, pady=6)
-        tk.Button(bottom, text="Open Insights", command=self.open_insights, bg="#00E5FF").pack(side=tk.LEFT, padx=8)
-        tk.Button(bottom, text="Eco Mode", command=self.open_eco_mode, bg="#4EEAF6").pack(side=tk.LEFT, padx=8)
-        tk.Button(bottom, text="AI Suggest", command=self.show_ai_suggestion, bg="#8E6CFF").pack(side=tk.LEFT, padx=8)
-
-    def _load_profile_state(self):
-        if self.profile:
-            self.lbl_profile.config(text=f"{self.profile['name']}\nAge: {self.profile['age']}\nWeight: {self.profile['weight_kg']} kg\nActivity: {self.profile['activity']}")
-        else:
-            self.lbl_profile.config(text="No profile set")
-
-    # ---------------------------
-    # Actions
-    # ---------------------------
-    def open_profile_dialog(self):
-        dlg = ProfileDialog(self)
-        self.wait_window(dlg)
-        if dlg.result:
-            name, age, weight, activity = dlg.result
-            set_profile(name, age, weight, activity)
-            self.profile = get_profile()
-            self._load_profile_state()
-            self.refresh_ui()
-
-    def log_and_refresh(self, ml):
-        log_water_ml(ml)
-        messagebox.showinfo("Logged", f"Logged {ml} ml")
-        self.refresh_ui()
-
-    def log_custom(self):
-        val = self.entry_custom.get().strip()
-        try:
-            amt = int(val)
-            if amt <= 0:
-                raise ValueError()
-        except:
-            messagebox.showerror("Invalid", "Enter a positive integer for ml")
-            return
-        self.log_and_refresh(amt)
-        self.entry_custom.delete(0, tk.END)
-
-    def refresh_ui(self):
-        # update profile & goals
-        self.profile = get_profile()
-        if self.profile:
-            goal = calculate_goal_ml(self.profile['weight_kg'], age=self.profile['age'], activity=self.profile['activity'])
-        else:
-            goal = 2000
-        today = get_today_total()
-        self.lbl_goal.config(text=f"Goal: {goal} ml")
-        self.lbl_today.config(text=f"Today: {today} ml")
-        # draw progress ring
-        self.draw_progress_ring(self.left_canvas, consumed=today, goal=goal)
-        # weekly chart
-        totals = get_totals_for_days(7)
-        self.draw_weekly_chart(self.right_canvas, totals, goal)
-        # update badges label left
-        if self.profile:
-            self.lbl_profile.config(text=f"{self.profile['name']}\nAge: {self.profile['age']}\nWeight: {self.profile['weight_kg']} kg\nActivity: {self.profile['activity']}")
-
-    def draw_progress_ring(self, canvas, consumed, goal):
-        canvas.delete("all")
-        # ring background
-        cx, cy = 190, 190
-        r = 120
-        canvas.create_oval(cx-r, cy-r, cx+r, cy+r, fill="#04262B", outline="")
-        # progress arc
-        pct = min(1.0, consumed/goal) if goal>0 else 0
-        extent = pct * 360
-        # gradient-like using multiple arcs
-        canvas.create_oval(cx-90, cy-90, cx+90, cy+90, outline="#0C5C6A", width=16)
-        canvas.create_arc(cx-90, cy-90, cx+90, cy+90, start=90, extent=-extent, style='arc', outline="#00E5FF", width=16)
-        # center text
-        canvas.create_text(cx, cy-10, text=f"{int(pct*100)}%", fill="#CFF8FF", font=("Montserrat", 24, "bold"))
-        canvas.create_text(cx, cy+24, text=f"{consumed} / {goal} ml", fill="#AEEFF6", font=("Lato", 12))
-
-        # small quick log buttons drawn near ring
-        btn_y = cy + r + 20
-        x_start = cx - 120
-        for i, amt in enumerate((50, 100, 250, 500)):
-            x = x_start + i * 70
-            # clickable rectangles - map clicks handled by binding
-            rect = canvas.create_rectangle(x-28, btn_y-18, x+28, btn_y+18, fill="#092C30", outline="#00AFC0")
-            text = canvas.create_text(x, btn_y, text=f"+{amt}", fill="#00E5FF")
-            canvas.tag_bind(rect, "<Button-1>", lambda e, a=amt: self.log_and_refresh(a))
-            canvas.tag_bind(text, "<Button-1>", lambda e, a=amt: self.log_and_refresh(a))
-
-    def draw_weekly_chart(self, canvas, totals, goal):
-        canvas.delete("all")
-        w = int(canvas['width'])
-        h = int(canvas['height'])
-        margin = 40
-        chart_w = w - 2*margin
-        chart_h = h - 100
-        left = margin
-        top = 40
-        # title
-        canvas.create_text(w//2, 20, text="Weekly Hydration (ml)", fill="#CFF8FF", font=("Montserrat", 14, "bold"))
-        # bars
-        max_val = max(goal, max(t['total_ml'] for t in totals)+1)
-        bar_w = chart_w / len(totals) * 0.6
-        spacing = chart_w / len(totals)
-        for i, t in enumerate(totals):
-            x = left + spacing*i + spacing*0.2
-            bar_h = (t['total_ml'] / max_val) * chart_h
-            canvas.create_rectangle(x, top+chart_h-bar_h, x+bar_w, top+chart_h, fill="#00CFEA", outline="")
-            # day label
-            canvas.create_text(x+bar_w/2, top+chart_h+14, text=t['date'].strftime("%a")[0], fill="#BFF3F7")
-            canvas.create_text(x+bar_w/2, top+chart_h-bar_h-10, text=str(int(t['total_ml'])), fill="#DFF9FF", font=("Lato", 8))
-
-        # goal line
-        goal_y = top + chart_h - (goal / max_val) * chart_h
-        canvas.create_line(left, goal_y, left+chart_w, goal_y, dash=(4,4), fill="#89F9FF")
-        canvas.create_text(left+chart_w-40, goal_y-8, text=f"Goal: {goal} ml", fill="#A9F0FF", font=("Lato", 9))
-
-    def start_reminders(self):
-        try:
-            mins = int(self.spin_interval.get())
-            if mins < 1:
-                raise ValueError()
-        except:
-            messagebox.showerror("Invalid", "Set interval in minutes (>=1)")
-            return
-        self.reminder_interval_min = mins
-        self.reminder_enabled = True
-        self.schedule_next_reminder()
-        messagebox.showinfo("Reminders", f"Reminders started every {mins} minutes")
-
-    def stop_reminders(self):
-        self.reminder_enabled = False
-        if self.reminder_job:
-            self.after_cancel(self.reminder_job)
-            self.reminder_job = None
-        messagebox.showinfo("Reminders", "Reminders stopped")
-
-    def schedule_next_reminder(self):
-        if not self.reminder_enabled:
-            return
-        # adapt interval slightly using predictor
-        adj = predictor_adjustment()
-        interval_ms = int(self.reminder_interval_min * 60 * 1000 / adj)
-        # schedule
-        if self.reminder_job:
-            self.after_cancel(self.reminder_job)
-        self.reminder_job = self.after(interval_ms, self.show_reminder)
-
-    def show_reminder(self):
-        today_total = get_today_total()
-        profile = get_profile()
-        if profile:
-            goal = calculate_goal_ml(profile['weight_kg'], age=profile['age'], activity=profile['activity'])
-        else:
-            goal = 2000
-        pct = int(min(100, (today_total/goal)*100)) if goal>0 else 0
-        if pct >= 100:
-            msg = "You reached your goal! Great job! 🎉"
-        else:
-            msg = f"Time to sip — you're at {pct}% of your daily goal."
-        # popup
-        popup = tk.Toplevel(self)
-        popup.title("Water Buddy Reminder")
-        popup.geometry("320x140")
-        popup.configure(bg="#062028")
-        tk.Label(popup, text="Water Buddy", bg="#062028", fg="#00E5FF", font=("Montserrat", 14, "bold")).pack(pady=(8,6))
-        tk.Label(popup, text=msg, bg="#062028", fg="#E6FBFF").pack(pady=(0,12))
-        btnf = tk.Frame(popup, bg="#062028")
-        btnf.pack(pady=6)
-        tk.Button(btnf, text="Log 250 ml", command=lambda: (log_water_ml(250), popup.destroy(), self.refresh_ui())).pack(side=tk.LEFT, padx=6)
-        tk.Button(btnf, text="Snooze 10 min", command=lambda: (popup.destroy(), self.snooze(10))).pack(side=tk.LEFT, padx=6)
-        # schedule next reminder
-        self.schedule_next_reminder()
-
-    def snooze(self, minutes):
-        if self.reminder_job:
-            self.after_cancel(self.reminder_job)
-            self.reminder_job = None
-        self.reminder_job = self.after(minutes * 60 * 1000, self.show_reminder)
-
-    def export_csv(self):
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files","*.csv"),("All files","*.*")])
-        if not path:
-            return
-        export_logs_csv(path)
-        messagebox.showinfo("Export", f"Logs exported to {path}")
-
-    def open_insights(self):
-        # simple insights window with some stats
-        w = tk.Toplevel(self)
-        w.title("Daily Insights")
-        w.geometry("560x420")
-        w.configure(bg="#041A1D")
-        profile = get_profile()
-        if not profile:
-            tk.Label(w, text="No profile set yet. Set your profile to get insights.", bg="#041A1D", fg="#CFF8FF").pack(padx=12, pady=12)
-            return
-        goal = calculate_goal_ml(profile['weight_kg'], age=profile['age'], activity=profile['activity'])
-        totals = get_totals_for_days(14)
-        avg = sum(t['total_ml'] for t in totals)/len(totals)
-        lbl = tk.Label(w, text=f"14-day average intake: {int(avg)} ml\nDaily goal: {goal} ml", bg="#041A1D", fg="#E8FFFF", font=("Lato", 12))
-        lbl.pack(padx=12, pady=12)
-        # small chart canvas
-        c = tk.Canvas(w, width=520, height=220, bg="#041A1D", highlightthickness=0)
-        c.pack(padx=12, pady=6)
-        # draw sparkline
-        mx = max(max(t['total_ml'] for t in totals), goal)
-        left = 20; top = 20; cw = 480; ch = 160
-        points = []
-        for i, t in enumerate(totals):
-            x = left + (i/(len(totals)-1)) * cw
-            y = top + ch - (t['total_ml']/mx)*ch
-            points.append((x,y))
-        for i in range(len(points)-1):
-            c.create_line(points[i][0], points[i][1], points[i+1][0], points[i+1][1], fill="#0DE7FF", width=2)
-        # goal line
-        gy = top + ch - (goal/mx)*ch
-        c.create_line(left, gy, left+cw, gy, dash=(3,3), fill="#89F9FF")
-        # badges
-        bdg = get_badges()
-        tk.Label(w, text="Badges earned:", bg="#041A1D", fg="#CFF8FF").pack(anchor='w', padx=12)
-        for name, earned in bdg:
-            tk.Label(w, text=f"- {name} (earned {earned[:10]})", bg="#041A1D", fg="#AEEFF6").pack(anchor='w', padx=24)
-
-    def open_eco_mode(self):
-        profile = get_profile()
-        if not profile:
-            messagebox.showinfo("Eco Mode", "Set profile first.")
-            return
-        totals = get_totals_for_days(7)
-        total_week = sum(t['total_ml'] for t in totals)
-        bottles_saved = estimate_bottles_saved(total_week, bottle_size_ml=500)
-        # show window
-        w = tk.Toplevel(self)
-        w.title("Eco Mode")
-        w.geometry("420x300")
-        w.configure(bg="#052022")
-        tk.Label(w, text="Eco Mode — Your environmental impact", bg="#052022", fg="#AEEFF6", font=("Montserrat", 12, "bold")).pack(pady=8)
-        tk.Label(w, text=f"This week you consumed {int(total_week)} ml", bg="#052022", fg="#DFF8FF").pack(pady=4)
-        tk.Label(w, text=f"Equivalent refillable bottles used: {bottles_saved:.1f}", bg="#052022", fg="#CFF8FF", font=("Lato", 12, "bold")).pack(pady=8)
-        tk.Label(w, text="Tip: Use a 500 ml refillable bottle to reduce single-use plastic.", bg="#052022", fg="#BFEFF6").pack(pady=6)
-        tk.Button(w, text="Close", command=w.destroy, bg="#00E5FF").pack(pady=12)
-
-    def show_badges(self):
-        bdg = get_badges()
-        txt = "\n".join([f"{name} — earned at {earned}" for name, earned in bdg]) if bdg else "No badges yet."
-        messagebox.showinfo("Badges", txt)
-
-    def show_ai_suggestion(self):
-        # quick suggestion based on predictor
-        adj = predictor_adjustment()
-        if adj > 1.05:
-            messagebox.showinfo("AI Suggestion", "We noticed your recent intake is low. We'll nudge you more often and suggest adding small 250 ml logs after chores.")
-        else:
-            messagebox.showinfo("AI Suggestion", "You're doing well! Maintain your streak and try eco mode for sustainability tips.")
+def plot_weekly_bars(totals, goal):
+    dates = [t['date'].strftime("%a") for t in totals]
+    vals = [t['total_ml'] for t in totals]
+    fig, ax = plt.subplots(figsize=(6, 3.2), dpi=80)
+    ax.bar(dates, vals, alpha=0.9)
+    ax.axhline(goal, color='tab:orange', linestyle='--', linewidth=1)
+    ax.set_ylabel("ml")
+    ax.set_title("Weekly Hydration (ml)")
+    for i, v in enumerate(vals):
+        ax.text(i, v + max(10, 0.02*goal), str(int(v)), ha='center', fontsize=8)
+    plt.tight_layout()
+    return fig
 
 # ---------------------------
-# Dialogs
+# Streamlit app UI
 # ---------------------------
-class ProfileDialog(tk.Toplevel):
-    def __init__(self, master):
-        super().__init__(master)
-        self.title("Profile")
-        self.geometry("320x240")
-        self.configure(bg="#052022")
-        self.result = None
+st.set_page_config(page_title="Water Buddy", layout="wide", initial_sidebar_state="expanded")
 
-        tk.Label(self, text="Name:", bg="#052022", fg="#CFF8FF").pack(anchor='w', padx=12, pady=(12,2))
-        self.entry_name = tk.Entry(self)
-        self.entry_name.pack(fill=tk.X, padx=12)
+# App header (two-column)
+col1, col2 = st.columns([1,3])
+with col1:
+    st.image(
+        "https://img.icons8.com/fluency/96/water.png",
+        width=72,
+        caption=""
+    )
+with col2:
+    st.markdown("<h1 style='margin-bottom:0px; color:#00E5FF'>Water Buddy</h1>", unsafe_allow_html=True)
+    st.markdown("<div style='color:#BFEFF6'>Formative Assessment 1 — Python · Streamlit port</div>", unsafe_allow_html=True)
 
-        tk.Label(self, text="Age:", bg="#052022", fg="#CFF8FF").pack(anchor='w', padx=12, pady=(8,2))
-        self.entry_age = tk.Entry(self)
-        self.entry_age.pack(fill=tk.X, padx=12)
+st.markdown("---")
 
-        tk.Label(self, text="Weight (kg):", bg="#052022", fg="#CFF8FF").pack(anchor='w', padx=12, pady=(8,2))
-        self.entry_weight = tk.Entry(self)
-        self.entry_weight.pack(fill=tk.X, padx=12)
+# Sidebar: Profile + Quick actions + Reminders
+with st.sidebar:
+    st.markdown("### Profile")
+    profile = get_profile()
+    if profile:
+        st.markdown(f"**{profile['name']}**  \nAge: {profile['age']}  \nWeight: {profile['weight_kg']} kg  \nActivity: {profile['activity']}")
+    else:
+        st.info("No profile set yet. Fill the form below and click Save.")
 
-        tk.Label(self, text="Activity (low/normal/high):", bg="#052022", fg="#CFF8FF").pack(anchor='w', padx=12, pady=(8,2))
-        self.entry_activity = tk.Entry(self)
-        self.entry_activity.insert(0, "normal")
-        self.entry_activity.pack(fill=tk.X, padx=12)
+    with st.expander("Edit / Create profile"):
+        name = st.text_input("Name", value=profile['name'] if profile else "")
+        age = st.number_input("Age", min_value=1, max_value=120, value=profile['age'] if profile else 25)
+        weight = st.number_input("Weight (kg)", min_value=20.0, max_value=300.0, value=float(profile['weight_kg']) if profile else 65.0)
+        activity = st.selectbox("Activity level", options=['low','normal','high'], index=['low','normal','high'].index(profile['activity']) if profile else 1)
+        if st.button("Save profile"):
+            set_profile(name or "You", age, weight, activity)
+            st.success("Profile saved. Refreshing...")
+            st.experimental_rerun()
 
-        btnf = tk.Frame(self, bg="#052022")
-        btnf.pack(pady=12)
-        tk.Button(btnf, text="Save", command=self.on_save, bg="#00E5FF").pack(side=tk.LEFT, padx=6)
-        tk.Button(btnf, text="Cancel", command=self.destroy, bg="#FF6B6B").pack(side=tk.LEFT)
+    st.markdown("---")
+    st.markdown("### Quick Log")
+    qcol1, qcol2 = st.columns(2)
+    with qcol1:
+        if st.button("+50 ml"):
+            log_water_ml(50)
+            st.success("Logged 50 ml")
+            st.experimental_rerun()
+        if st.button("+250 ml"):
+            log_water_ml(250)
+            st.success("Logged 250 ml")
+            st.experimental_rerun()
+    with qcol2:
+        if st.button("+100 ml"):
+            log_water_ml(100)
+            st.success("Logged 100 ml")
+            st.experimental_rerun()
+        if st.button("+500 ml"):
+            log_water_ml(500)
+            st.success("Logged 500 ml")
+            st.experimental_rerun()
 
-    def on_save(self):
-        name = self.entry_name.get().strip() or "You"
-        try:
-            age = int(self.entry_age.get().strip())
-            weight = float(self.entry_weight.get().strip())
-        except:
-            messagebox.showerror("Invalid", "Enter valid numeric age and weight.")
-            return
-        activity = self.entry_activity.get().strip().lower() or "normal"
-        if activity not in ('low','normal','high'):
-            messagebox.showerror("Invalid", "Activity must be low, normal or high")
-            return
-        self.result = (name, age, weight, activity)
-        self.destroy()
+    st.markdown("Custom log (ml)")
+    custom_ml = st.number_input("", min_value=1, step=50, value=250, key="custom_ml_input")
+    if st.button("Log custom"):
+        log_water_ml(custom_ml)
+        st.success(f"Logged {custom_ml} ml")
+        st.experimental_rerun()
 
-# ---------------------------
-# Run
-# ---------------------------
-if __name__ == "__main__":
-    app = WaterBuddyApp()
-    app.mainloop()
+    st.markdown("---")
+    st.markdown("### Reminders (browser notifications)")
+    remind_interval = st.number_input("Interval (minutes)", min_value=5, max_value=240, value=60, step=5, key="rem_int")
+    start_reminders = st.button("Enable reminders")
+    stop_reminders = st.button("Disable reminders")
+    st.markdown("**Note:** Notifications use the browser Notification API. Keep the app tab open and allow notifications when asked.")
+
+    st.markdown("---")
+    st.markdown("### Utilities")
+    csv_bytes = export_logs_csv_bytes()
+    st.download_button("Export logs CSV", data=csv_bytes, file_name="water_buddy_logs.csv", mime="text/csv")
+    if st.button("Show Badges"):
+        badges = get_badges()
+        if badges:
+            for name, earned in badges:
+                st.write(f"- **{name}** (earned {earned[:10]})")
+        else:
+            st.info("No badges yet.")
+
+# Main area: Summary and charts
+profile = get_profile()  # refresh
+
+if profile:
+    goal = calculate_goal_ml(profile['weight_kg'], age=profile['age'], activity=profile['activity'])
+else:
+    goal = 2000
+
+today = get_today_total()
+st.markdown(f"### Goal: **{goal} ml**  —  Today: **{today} ml**")
+
+# Layout for donut + weekly chart + AI suggest
+left_col, right_col = st.columns([1,2])
+with left_col:
+    st.markdown("#### Progress")
+    fig = plot_progress_donut(today, goal)
+    st.pyplot(fig)
+
+    st.markdown("#### AI Suggestion")
+    adj = predictor_adjustment()
+    if adj > 1.05:
+        st.info("We noticed recent intake is below goal — consider smaller frequent sips. We'll nudge more often.")
+    else:
+        st.success("You're doing well! Keep the streak going.")
+
+with right_col:
+    st.markdown("#### Weekly Hydration")
+    totals = get_totals_for_days(7)
+    fig2 = plot_weekly_bars(totals, goal)
+    st.pyplot(fig2)
+
+# Insights & Eco Mode
+st.markdown("### Insights")
+col_a, col_b, col_c = st.columns(3)
+
+with col_a:
+    totals14 = get_totals_for_days(14)
+    avg14 = int(sum(t['total_ml'] for t in totals14)/len(totals14))
+    st.metric("14-day average (ml)", avg14)
+
+with col_b:
+    total_week = sum(t['total_ml'] for t in totals)
+    bottles = estimate_bottles_saved(total_week, 500)
+    st.metric("This week's total (ml)", int(total_week))
+    st.metric("Refill bottles (500ml)", f"{bottles:.1f}")
+
+with col_c:
+    badges = get_badges()
+    st.write("Badges")
+    if badges:
+        for name, earned in badges:
+            st.write(f"- **{name}** (earned {earned[:10]})")
+    else:
+        st.write("_No badges yet._")
+
+st.markdown("---")
+st.markdown("### Eco Mode — Environmental impact")
+st.write("Tip: Use a refillable bottle (e.g., 500 ml) to reduce single-use plastic.")
+eco_col1, eco_col2 = st.columns([2,1])
+with eco_col1:
+    st.write(f"This week you consumed **{int(total_week)} ml**.")
+    st.write(f"Equivalent refillable bottles used: **{bottles:.1f}** (500 ml)")
+    co2_saved_kg = bottles * 0.082  # rough g->kg conversion (82 g CO2 per single-use bottle)
+    st.write(f"Estimated CO₂ saved: **{co2_saved_kg:.2f} kg**")
+with eco_col2:
+    if st.button("Log 250 ml (quick)"):
+        log_water_ml(250)
+        st.success("Logged 250 ml")
+        st.experimental_rerun()
+
+# Simple predictor explanation
+st.markdown("---")
+st.markdown("### How suggestions are generated")
+st.write("The predictor checks the last 3 days' average vs. your daily goal and adjusts nudges if you're below 70% or 90% thresholds.")
+
+# Raw logs view (collapsible)
+with st.expander("Show raw logs"):
+    df = export_logs_df()
+    if df.empty:
+        st.info("No logs yet.")
+    else:
+        st.dataframe(df)
+
+# Notification JS (client-side reminders)
+notification_js = f"""
+<script>
+const intervalMinutes = {int(st.session_state.get('rem_int', remind_interval))};
+let timerId = null;
+
+function askPermissionAndStart() {{
+    if (!("Notification" in window)) {{
+        console.log("This browser does not support notifications.");
+        return;
+    }}
+    if (Notification.permission === "granted") {{
+        startTimer();
+    }} else if (Notification.permission !== "denied") {{
+        Notification.requestPermission().then(permission => {{
+            if (permission === "granted") startTimer();
+        }});
+    }}
+}}
+
+function startTimer() {{
+    if (timerId) clearInterval(timerId);
+    timerId = setInterval(() => {{
+        const notif = new Notification("Water Buddy — Time to sip!", {{
+            body: "Open the app to log a quick drink. Stay hydrated! 💧",
+            icon: ""
+        }});
+        // auto close after some seconds
+        setTimeout(()=>notif.close(), 8000);
+    }}, intervalMinutes * 60 * 1000);
+}}
+
+function stopTimer() {{
+    if (timerId) clearInterval(timerId);
+    timerId = null;
+}}
+
+window.startWaterBuddyReminders = askPermissionAndStart;
+window.stopWaterBuddyReminders = stopTimer;
+</script>
+"""
+
+# Put JS into page and control via buttons
+st.components.v1.html(notification_js, height=0)
+
+# Trigger start/stop from server side button clicks
+if 'reminders_enabled' not in st.session_state:
+    st.session_state['reminders_enabled'] = False
+
+if start_reminders:
+    st.session_state['reminders_enabled'] = True
+    st.session_state['rem_int'] = remind_interval
+    st.components.v1.html("<script>window.startWaterBuddyReminders();</script>", height=0)
+    st.success(f"Reminders enabled every {remind_interval} minutes (browser notifications).")
+
+if stop_reminders:
+    st.session_state['reminders_enabled'] = False
+    st.components.v1.html("<script>window.stopWaterBuddyReminders();</script>", height=0)
+    st.info("Reminders disabled.")
+
+# Footer
+st.markdown("---")
+st.markdown("Built from a Tkinter prototype — ported to Streamlit. Keep this tab open to receive browser reminders.")
