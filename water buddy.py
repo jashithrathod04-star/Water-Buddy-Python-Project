@@ -233,7 +233,7 @@ class WaterBuddyApp(tk.Tk):
         title.pack(side=tk.LEFT, padx=18, pady=12)
         subtitle = tk.Label(header, text="Formative Assessment 1 — Python", fg="#BFEFF6", bg="#062027", font=("Lato", 10))
         subtitle.pack(side=tk.LEFT, padx=6, pady=18)
-        name = tk.Label(header, text="By: Jashith Rathod", fg="#A9F0FF", bg="#062027", font=("Lato", 10))
+        name = tk.Label(header, text="By: Jashith Rathod,Nishtha Shah & Zene Anand", fg="#A9F0FF", bg="#062027", font=("Lato", 10))
         name.pack(side=tk.RIGHT, padx=18)
 
     def _build_left_panel(self):
